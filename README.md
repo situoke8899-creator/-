@@ -1,1 +1,1 @@
-澳门六合彩特码出现率排行系统。上传到 GitHub 后用 Vercel 部署。
+澳门六合彩特码排行系统 - 无密码版。无 SITE_PASSWORD、无 middleware、无登录验证。
