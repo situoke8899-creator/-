@@ -1,6 +1,6 @@
 export const metadata = {
-  title: '澳门六合彩特码排行系统',
-  description: '澳门六合彩特码出现率排行与推荐系统',
+  title: '宾果六合彩尾数预测与回测系统',
+  description: '宾果六合彩历史开奖尾数统计页面',
 }
 
 export default function RootLayout({ children }) {
