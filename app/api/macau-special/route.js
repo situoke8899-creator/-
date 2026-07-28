@@ -3,262 +3,227 @@ import { NextResponse } from 'next/server'
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
 
-const WINDOWS = [20, 50, 100, 200]
-const MAX_HISTORY = 260
+const PRIMARY = 'https://www.kj1868.cc'
+const BACKUP = 'https://www.kj1868.com'
+const GAME_CODE = 'bingosix'
+const PAGE_SIZE = 100
+const MAX_PAGES = 5
 
-function getYears() {
-  const year = new Date().getFullYear()
-  return [year, year - 1]
+function parseNumbers(value) {
+  if (!value) return []
+
+  return String(value)
+    .split(',')
+    .map((n) => Number(String(n).trim()))
+    .filter((n) => Number.isInteger(n) && n >= 1 && n <= 49)
+}
+
+function normalizeItem(item) {
+  const numbers = parseNumbers(item?.numbers)
+  if (numbers.length < 7) return null
+
+  return {
+    expect: String(item?.period || ''),
+    openTime: item?.lottery_date || '',
+    openCode: numbers.slice(0, 7).join(','),
+    numbers: numbers.slice(0, 7),
+    specialNumber: numbers[6],
+  }
+}
+
+function sortHistory(list) {
+  return [...list].sort((a, b) => {
+    const ea = BigInt(String(a.expect || '0').replace(/\D/g, '') || '0')
+    const eb = BigInt(String(b.expect || '0').replace(/\D/g, '') || '0')
+
+    if (ea !== eb) return eb > ea ? 1 : -1
+
+    const ta = new Date(a.openTime || 0).getTime()
+    const tb = new Date(b.openTime || 0).getTime()
+    return tb - ta
+  })
 }
 
 async function fetchJson(url) {
-  const res = await fetch(`${url}${url.includes('?') ? '&' : '?'}_t=${Date.now()}`, {
-    cache: 'no-store',
-    headers: {
-      accept: 'application/json,text/plain,*/*',
-      'user-agent': 'Mozilla/5.0',
-    },
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 12000)
 
-  const text = await res.text()
-
-  if (!res.ok) throw new Error(`接口请求失败：${url}`)
-  if (!text.trim()) throw new Error(`接口返回空内容：${url}`)
-  if (text.trim().startsWith('<')) throw new Error(`接口返回网页，不是JSON：${url}`)
-
-  return JSON.parse(text)
-}
-
-function parseOpenCode(openCode) {
-  return String(openCode || '')
-    .split(',')
-    .map((item) => Number(String(item).trim()))
-    .filter((num) => Number.isInteger(num) && num >= 1 && num <= 49)
-}
-
-function normalizeRows(json) {
-  const rows = Array.isArray(json?.data)
-    ? json.data
-    : Array.isArray(json?.list)
-    ? json.list
-    : Array.isArray(json)
-    ? json
-    : []
-
-  return rows
-    .map((item) => {
-      const numbers = parseOpenCode(item.openCode)
-      const specialNumber = numbers[numbers.length - 1]
-
-      if (numbers.length < 7 || !Number.isInteger(specialNumber)) return null
-
-      return {
-        expect: String(item.expect || ''),
-        openTime: item.openTime || item.time || '',
-        openCode: numbers.map((num) => String(num).padStart(2, '0')).join(','),
-        numbers,
-        specialNumber,
-        specialCode: String(specialNumber).padStart(2, '0'),
-      }
+  try {
+    const res = await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+      headers: {
+        accept: 'application/json, text/plain, */*',
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150 Safari/537.36',
+        referer:
+          'https://www.kj1868.cc/view/historyLottery/historyRecord.html?gameKey=bingosix',
+      },
     })
-    .filter(Boolean)
-}
 
-async function getHistory() {
-  const all = []
-  const errors = []
+    const text = await res.text()
 
-  for (const year of getYears()) {
-    const url = `https://history.macaumarksix.com/history/macaujc2/y/${year}`
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
+    }
+
+    if (!text || !text.trim()) {
+      throw new Error('接口返回空内容')
+    }
+
+    if (text.trim().startsWith('<')) {
+      throw new Error('接口返回网页而不是 JSON')
+    }
 
     try {
-      const json = await fetchJson(url)
-      all.push(...normalizeRows(json))
+      return JSON.parse(text)
+    } catch {
+      throw new Error('JSON 解析失败')
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function extractList(json) {
+  if (!json || String(json.status) !== '10') return []
+
+  // 新版文档：data = { total, per_page, current_page, last_page, data: [...] }
+  if (Array.isArray(json?.data?.data)) return json.data.data
+
+  // 兼容旧版：data = [...]
+  if (Array.isArray(json?.data)) return json.data
+
+  return []
+}
+
+async function fetchPage(host, page = 1) {
+  const url =
+    `${host}/openapi/drawLottery/${GAME_CODE}/last.kj` +
+    `?page=${page}&pageSize=${PAGE_SIZE}`
+
+  const json = await fetchJson(url)
+
+  if (String(json?.status) !== '10') {
+    throw new Error(json?.message || '开奖接口返回失败状态')
+  }
+
+  const list = extractList(json)
+
+  return {
+    list,
+    lastPage: Number(json?.data?.last_page || 1),
+    url,
+  }
+}
+
+async function fetchHistoryFromHost(host) {
+  const first = await fetchPage(host, 1)
+
+  const all = [...first.list]
+  const pageCount = Math.max(
+    1,
+    Math.min(MAX_PAGES, Number(first.lastPage || 1))
+  )
+
+  // 最多拉5页，每页100条；接口如果只允许近期数据，也能正常工作。
+  for (let page = 2; page <= pageCount; page += 1) {
+    try {
+      const result = await fetchPage(host, page)
+      all.push(...result.list)
     } catch (error) {
-      errors.push(error.message)
+      console.warn(`第${page}页读取失败：`, error.message)
+      break
     }
   }
 
-  const map = new Map()
-  all.forEach((item) => {
-    if (item.expect) map.set(item.expect, item)
+  return all
+}
+
+async function getBingoSixData() {
+  let raw = []
+  let sourceHost = PRIMARY
+  let lastError = ''
+
+  for (const host of [PRIMARY, BACKUP]) {
+    try {
+      raw = await fetchHistoryFromHost(host)
+      if (raw.length) {
+        sourceHost = host
+        break
+      }
+    } catch (error) {
+      lastError = error.message
+      console.warn(`${host} 获取失败：`, error.message)
+    }
+  }
+
+  if (!raw.length) {
+    throw new Error(
+      `没有获取到宾果六合彩开奖数据${lastError ? `：${lastError}` : ''}`
+    )
+  }
+
+  const uniqueMap = new Map()
+
+  raw.forEach((item) => {
+    const normalized = normalizeItem(item)
+    if (normalized?.expect) {
+      uniqueMap.set(normalized.expect, normalized)
+    }
   })
 
-  const history = Array.from(map.values())
-    .sort((a, b) => {
-      const ea = Number(a.expect || 0)
-      const eb = Number(b.expect || 0)
-      if (eb !== ea) return eb - ea
-      return new Date(b.openTime || 0).getTime() - new Date(a.openTime || 0).getTime()
-    })
-    .slice(0, MAX_HISTORY)
+  const history = sortHistory(Array.from(uniqueMap.values()))
 
   if (!history.length) {
-    throw new Error(errors[0] || '没有获取到澳门六合彩开奖历史')
+    throw new Error('接口有返回，但没有解析到有效的7个开奖号码')
   }
 
-  return history
-}
+  const latest = history[0]
 
-function calcCurrentMiss(history, num) {
-  let miss = 0
-
-  for (const row of history) {
-    if (row.specialNumber === num) break
-    miss += 1
-  }
-
-  return miss
-}
-
-function buildRank(history, size) {
-  const source = history.slice(0, size)
-
-  const rows = Array.from({ length: 49 }, (_, index) => {
-    const num = index + 1
-    return {
-      num,
-      code: String(num).padStart(2, '0'),
-      count: 0,
-      rate: 0,
-      currentMiss: 0,
-      lastExpect: '',
-      lastOpenTime: '',
-    }
-  })
-
-  source.forEach((item) => {
-    const num = Number(item.specialNumber)
-    if (!Number.isInteger(num) || num < 1 || num > 49) return
-
-    const row = rows[num - 1]
-    row.count += 1
-
-    if (!row.lastExpect) {
-      row.lastExpect = item.expect
-      row.lastOpenTime = item.openTime
-    }
-  })
-
-  rows.forEach((row) => {
-    row.rate = source.length ? Number(((row.count / source.length) * 100).toFixed(2)) : 0
-    row.currentMiss = calcCurrentMiss(history, row.num)
-  })
-
-  return rows.sort((a, b) => {
-    if (b.count !== a.count) return b.count - a.count
-    if (a.currentMiss !== b.currentMiss) return a.currentMiss - b.currentMiss
-    return a.num - b.num
-  })
-}
-
-function buildRecommend(history) {
-  const rank20 = buildRank(history, 20)
-  const rank50 = buildRank(history, 50)
-  const rank100 = buildRank(history, 100)
-  const rank200 = buildRank(history, 200)
-
-  const map = new Map()
-
-  for (let num = 1; num <= 49; num++) {
-    map.set(num, {
-      num,
-      code: String(num).padStart(2, '0'),
-      score: 0,
-      count20: 0,
-      count50: 0,
-      count100: 0,
-      count200: 0,
-      currentMiss: calcCurrentMiss(history, num),
-    })
-  }
-
-  function addScore(rank, weight, key) {
-    rank.forEach((item, index) => {
-      const row = map.get(item.num)
-      row.score += item.count * weight
-      row[key] = item.count
-
-      if (index < 10) {
-        row.score += (10 - index) * weight * 0.12
-      }
-    })
-  }
-
-  addScore(rank20, 5, 'count20')
-  addScore(rank50, 2.8, 'count50')
-  addScore(rank100, 1.5, 'count100')
-  addScore(rank200, 0.8, 'count200')
-
-  Array.from(map.values()).forEach((row) => {
-    if (row.currentMiss >= 15) row.score += 3
-    if (row.currentMiss >= 25) row.score += 5
-    row.score = Number(row.score.toFixed(2))
-  })
-
-  return Array.from(map.values())
-    .sort((a, b) => {
-      if (b.score !== a.score) return b.score - a.score
-      if (b.count20 !== a.count20) return b.count20 - a.count20
-      if (b.count50 !== a.count50) return b.count50 - a.count50
-      return a.num - b.num
-    })
-    .slice(0, 10)
-}
-
-function hitRateForNumbers(history, numbers, size) {
-  const source = history.slice(0, size)
-  const set = new Set(numbers)
-  const hitCount = source.filter((item) => set.has(item.specialNumber)).length
-
-  let currentMiss = 0
-  for (const item of source) {
-    if (set.has(item.specialNumber)) break
-    currentMiss += 1
+  let nextExpect = ''
+  try {
+    nextExpect = (BigInt(latest.expect) + 1n).toString()
+  } catch {
+    nextExpect = ''
   }
 
   return {
-    size,
-    testedCount: source.length,
-    hitCount,
-    missCount: source.length - hitCount,
-    hitRate: source.length ? Number(((hitCount / source.length) * 100).toFixed(2)) : 0,
-    currentMiss,
+    ok: true,
+    play: 'bingosix',
+    source: `${sourceHost} / openapi / bingosix`,
+    latest,
+    nextExpect,
+    history: history.slice(0, 500),
+    recentHistory: history.slice(0, 50),
+    updatedAt: new Date().toISOString(),
   }
 }
 
 export async function GET() {
   try {
-    const history = await getHistory()
-    const recommend = buildRecommend(history)
-    const recommendNumbers = recommend.map((item) => item.num)
+    const data = await getBingoSixData()
 
-    const ranks = {}
-    const recommendStats = {}
-
-    WINDOWS.forEach((size) => {
-      ranks[size] = buildRank(history, size)
-      recommendStats[size] = hitRateForNumbers(history, recommendNumbers, size)
-    })
-
-    return NextResponse.json({
-      ok: true,
-      play: 'macaujc-special-no-password',
-      source: 'history.macaumarksix.com/history/macaujc2',
-      latest: history[0],
-      history: history.slice(0, 200),
-      ranks,
-      recommend,
-      recommendStats,
-      updatedAt: new Date().toISOString(),
+    return NextResponse.json(data, {
+      status: 200,
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      },
     })
   } catch (error) {
+    console.error('宾果六合彩接口错误：', error)
+
     return NextResponse.json(
       {
         ok: false,
-        message: error.message || '获取澳门六合彩特码数据失败',
+        message: error?.message || '获取开奖数据失败，请稍后刷新重试',
       },
-      { status: 500 }
+      {
+        status: 500,
+        headers: {
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        },
+      }
     )
   }
 }
