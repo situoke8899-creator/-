@@ -308,6 +308,12 @@ export default function Page() {
 
   useEffect(() => {
     loadData()
+
+    const timer = window.setInterval(() => {
+      loadData()
+    }, 20000)
+
+    return () => window.clearInterval(timer)
   }, [])
 
   const history = data?.history || []
@@ -439,7 +445,7 @@ export default function Page() {
         <section className="hero">
           <div className="hero-card">
             <h1>槟果六合彩尾数预测与回测系统</h1>
-            <p className="subtitle">增加下一期尾数参考，不预测具体开奖号码。系统自动读取历史开奖，分别测试近 20 / 30 / 50 期的命中率、最大连错、当前连错和覆盖率，筛出当前综合排名最高的 8 尾方案。</p>
+            <p className="subtitle">自动抓取开奖1868「宾果六合彩」历史开奖，每20秒刷新一次；按特码尾数进行近 20 / 30 / 50 期回测、热度/遗漏统计与综合8尾参考。</p>
 
             {selected && (
               <div className="selected-box">
