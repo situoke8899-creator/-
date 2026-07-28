@@ -30,6 +30,233 @@ function fmtPercent(value) {
   return `${Number(value || 0).toFixed(2)}%`
 }
 
+
+const HEAD_STRATEGIES = [
+  { id: 'h1', group: '20期｜4热', name: '方案1', window: 20, hotCount: 4, coldCount: 0, tieMode: 'recent' },
+  { id: 'h2', group: '20期｜4热', name: '方案2', window: 20, hotCount: 4, coldCount: 0, tieMode: 'weighted' },
+  { id: 'h3', group: '20期｜4热', name: '方案3', window: 20, hotCount: 4, coldCount: 0, tieMode: 'shortOmit' },
+  { id: 'h4', group: '20期｜4热', name: '方案4', window: 20, hotCount: 4, coldCount: 0, tieMode: 'support30' },
+
+  { id: 'h5', group: '30期｜3热 + 1冷', name: '方案5', window: 30, hotCount: 3, coldCount: 1, tieMode: 'recent', coldMode: 'longOmit' },
+  { id: 'h6', group: '30期｜3热 + 1冷', name: '方案6', window: 30, hotCount: 3, coldCount: 1, tieMode: 'weighted', coldMode: 'lowestCount' },
+  { id: 'h7', group: '30期｜3热 + 1冷', name: '方案7', window: 30, hotCount: 3, coldCount: 1, tieMode: 'support30', coldMode: 'rebound' },
+
+  { id: 'h8', group: '30期｜2热 + 2冷', name: '方案8', window: 30, hotCount: 2, coldCount: 2, tieMode: 'recent', coldMode: 'longOmit' },
+  { id: 'h9', group: '30期｜2热 + 2冷', name: '方案9', window: 30, hotCount: 2, coldCount: 2, tieMode: 'weighted', coldMode: 'lowestCount' },
+  { id: 'h10', group: '30期｜2热 + 2冷', name: '方案10', window: 30, hotCount: 2, coldCount: 2, tieMode: 'shortOmit', coldMode: 'rebound' },
+]
+
+function getHead(num) {
+  const n = Number(num || 0)
+  if (!Number.isFinite(n) || n < 1 || n > 49) return -1
+  return Math.floor(n / 10)
+}
+
+function buildHeadMetrics(source, supportSource = source) {
+  const rows = Array.from({ length: 5 }, (_, head) => ({
+    head,
+    count: 0,
+    recentWeight: 0,
+    omit: source.length,
+    support30: 0,
+  }))
+
+  source.forEach((item, index) => {
+    const specialNumber = Number(item.specialNumber || item.numbers?.[6])
+    const head = getHead(specialNumber)
+    if (head < 0 || head > 4) return
+
+    rows[head].count += 1
+    rows[head].recentWeight += Math.max(1, source.length - index)
+
+    if (rows[head].omit === source.length) rows[head].omit = index
+  })
+
+  supportSource.forEach((item) => {
+    const specialNumber = Number(item.specialNumber || item.numbers?.[6])
+    const head = getHead(specialNumber)
+    if (head >= 0 && head <= 4) rows[head].support30 += 1
+  })
+
+  return rows
+}
+
+function sortHotHeads(metrics, tieMode) {
+  return [...metrics].sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count
+
+    if (tieMode === 'weighted' && b.recentWeight !== a.recentWeight) {
+      return b.recentWeight - a.recentWeight
+    }
+
+    if (tieMode === 'shortOmit' && a.omit !== b.omit) {
+      return a.omit - b.omit
+    }
+
+    if (tieMode === 'support30' && b.support30 !== a.support30) {
+      return b.support30 - a.support30
+    }
+
+    if (b.recentWeight !== a.recentWeight) return b.recentWeight - a.recentWeight
+    if (a.omit !== b.omit) return a.omit - b.omit
+
+    return a.head - b.head
+  })
+}
+
+function sortColdHeads(metrics, coldMode) {
+  return [...metrics].sort((a, b) => {
+    if (coldMode === 'lowestCount') {
+      if (a.count !== b.count) return a.count - b.count
+      if (b.omit !== a.omit) return b.omit - a.omit
+    } else if (coldMode === 'rebound') {
+      const scoreA = a.omit * 3 - a.count + a.support30 * 0.15
+      const scoreB = b.omit * 3 - b.count + b.support30 * 0.15
+      if (scoreB !== scoreA) return scoreB - scoreA
+    } else {
+      if (b.omit !== a.omit) return b.omit - a.omit
+      if (a.count !== b.count) return a.count - b.count
+    }
+
+    if (a.recentWeight !== b.recentWeight) return a.recentWeight - b.recentWeight
+    return a.head - b.head
+  })
+}
+
+function predictHeadsFromHistory(history, strategy) {
+  const source = history.slice(0, strategy.window)
+  const support = history.slice(0, 30)
+
+  if (!source.length) return []
+
+  const metrics = buildHeadMetrics(source, support)
+  const hot = sortHotHeads(metrics, strategy.tieMode)
+    .slice(0, strategy.hotCount)
+    .map((item) => item.head)
+
+  const picked = new Set(hot)
+
+  if (strategy.coldCount > 0) {
+    const coldCandidates = sortColdHeads(
+      metrics.filter((item) => !picked.has(item.head)),
+      strategy.coldMode
+    )
+
+    coldCandidates.slice(0, strategy.coldCount).forEach((item) => picked.add(item.head))
+  }
+
+  // 极端情况下补满4个头
+  sortHotHeads(metrics, 'recent').forEach((item) => {
+    if (picked.size < 4) picked.add(item.head)
+  })
+
+  return Array.from(picked).slice(0, 4).sort((a, b) => a - b)
+}
+
+function backtestHeadStrategy(history, strategy, size) {
+  const limit = Math.min(size, history.length)
+  const rows = []
+
+  for (let index = 0; index < limit; index += 1) {
+    const past = history.slice(index + 1)
+    if (past.length < strategy.window) continue
+
+    const heads = predictHeadsFromHistory(past, strategy)
+    const draw = history[index]
+    const specialNumber = Number(draw.specialNumber || draw.numbers?.[6])
+    const actualHead = getHead(specialNumber)
+
+    rows.push({
+      expect: draw.expect,
+      actualHead,
+      heads,
+      hit: heads.includes(actualHead),
+    })
+  }
+
+  const results = rows.map((row) => row.hit)
+  const testedCount = rows.length
+  const hitCount = rows.filter((row) => row.hit).length
+
+  return {
+    rows,
+    testedCount,
+    hitCount,
+    missCount: testedCount - hitCount,
+    hitRate: testedCount ? (hitCount / testedCount) * 100 : 0,
+    maxMiss: calcMaxMiss(results),
+    currentMiss: calcCurrentMiss(results),
+  }
+}
+
+function buildHeadRanking(history) {
+  return HEAD_STRATEGIES.map((strategy) => {
+    const heads = predictHeadsFromHistory(history, strategy)
+    const result20 = backtestHeadStrategy(history, strategy, 20)
+    const result30 = backtestHeadStrategy(history, strategy, 30)
+    const result50 = backtestHeadStrategy(history, strategy, 50)
+
+    const score =
+      result20.hitRate * 0.5 +
+      result30.hitRate * 0.3 +
+      result50.hitRate * 0.2 -
+      result20.maxMiss * 1.25
+
+    return {
+      ...strategy,
+      heads,
+      result20,
+      result30,
+      result50,
+      score: Number(score.toFixed(2)),
+    }
+  }).sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    if (b.result20.hitRate !== a.result20.hitRate) return b.result20.hitRate - a.result20.hitRate
+    return a.result20.maxMiss - b.result20.maxMiss
+  })
+}
+
+function buildHeadConsensus(ranking) {
+  const map = new Map(Array.from({ length: 5 }, (_, head) => [head, {
+    head,
+    appear: 0,
+    weight: 0,
+  }]))
+
+  ranking.slice(0, 10).forEach((item, index) => {
+    const rankWeight = 10 - index
+
+    item.heads.forEach((head) => {
+      const old = map.get(head)
+      map.set(head, {
+        ...old,
+        appear: old.appear + 1,
+        weight: old.weight + rankWeight,
+      })
+    })
+  })
+
+  const stats = Array.from(map.values()).sort((a, b) => {
+    if (b.appear !== a.appear) return b.appear - a.appear
+    if (b.weight !== a.weight) return b.weight - a.weight
+    return a.head - b.head
+  })
+
+  return {
+    heads: stats.slice(0, 4).map((item) => item.head).sort((a, b) => a - b),
+    stats,
+  }
+}
+
+function HeadBadge({ head, active = true }) {
+  return (
+    <span className={active ? 'head-badge active' : 'head-badge'}>
+      {head}头
+    </span>
+  )
+}
+
 function calcMaxMiss(results) {
   let max = 0
   let current = 0
@@ -291,6 +518,7 @@ export default function Page() {
   const [selectedId, setSelectedId] = useState('')
   const [copied, setCopied] = useState(false)
   const [selectedCopied, setSelectedCopied] = useState(false)
+  const [headCopied, setHeadCopied] = useState(false)
 
   async function loadData() {
     setLoading(true)
@@ -327,6 +555,8 @@ export default function Page() {
   }, [])
 
   const history = data?.history || []
+  const headRanking = useMemo(() => buildHeadRanking(history), [history])
+  const headConsensus = useMemo(() => buildHeadConsensus(headRanking), [headRanking])
   const ranking = useMemo(() => buildRanking(history), [history])
   const selected = ranking.find((item) => item.id === selectedId) || ranking[0]
   const heat = useMemo(() => buildTailHeat(history, 50), [history])
@@ -378,6 +608,19 @@ export default function Page() {
     }
   }
 
+
+  async function copyHeadConsensus() {
+    const copyText = `第${data?.nextExpect || '-'}期头数参考：${headConsensus.heads.map((head) => `${head}头`).join(' ')}`
+    try {
+      await navigator.clipboard.writeText(copyText)
+      setHeadCopied(true)
+      window.setTimeout(() => setHeadCopied(false), 1500)
+    } catch (error) {
+      setHeadCopied(false)
+      alert(copyText)
+    }
+  }
+
   return (
     <main className="page">
       <style jsx global>{`
@@ -423,6 +666,21 @@ export default function Page() {
         .tail-list { display: flex; flex-wrap: wrap; gap: 6px; }
         .tail-badge { display: inline-flex; width: 28px; height: 28px; border-radius: 10px; align-items: center; justify-content: center; background: #1e293b; border: 1px solid #334155; color: #cbd5e1; font-weight: 800; }
         .tail-badge.active { background: #22c55e; color: #052e16; border-color: #86efac; }
+        .head-predict-card { border: 1px solid rgba(56,189,248,.24); background: linear-gradient(180deg, rgba(8,25,48,.95), rgba(8,18,34,.96)); }
+        .head-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+        .head-consensus { padding: 16px; border-radius: 16px; background: rgba(34,197,94,.08); border: 1px solid rgba(34,197,94,.25); min-width: 330px; }
+        .head-list { display: flex; flex-wrap: wrap; gap: 8px; }
+        .head-badge { display: inline-flex; min-width: 54px; height: 34px; padding: 0 11px; align-items: center; justify-content: center; border-radius: 11px; background: #16243a; border: 1px solid #34445d; color: #cbd5e1; font-weight: 900; }
+        .head-badge.active { background: #22c55e; color: #052e16; border-color: #86efac; box-shadow: inset 0 -2px 0 rgba(0,0,0,.18); }
+        .head-table-wrap { overflow-x: auto; }
+        .head-row-title { min-width: 150px; }
+        .method-chip { display: inline-flex; margin-top: 5px; padding: 3px 8px; border-radius: 999px; font-size: 12px; color: #93c5fd; background: rgba(59,130,246,.12); border: 1px solid rgba(59,130,246,.2); }
+        .rank-chip { display: inline-flex; width: 28px; height: 28px; border-radius: 50%; align-items: center; justify-content: center; margin-right: 7px; font-weight: 900; background: rgba(250,204,21,.14); color: #fde047; border: 1px solid rgba(250,204,21,.25); }
+        .head-hit-dots { display: grid; grid-template-columns: repeat(10, 19px); gap: 3px; min-width: 220px; }
+        .head-hit-dot { width: 19px; height: 19px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; background: #ef4444; }
+        .head-hit-dot.good { background: #22c55e; }
+        .head-rate-main { font-size: 18px; font-weight: 900; }
+        .head-note { margin-top: 10px; font-size: 12px; color: #91a4bf; line-height: 1.6; }
         .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
         .stat { padding: 14px; border-radius: 14px; background: rgba(2, 6, 23, .36); border: 1px solid rgba(148, 163, 184, .16); }
         .stat-label { color: #9fb2cc; font-size: 13px; margin-bottom: 8px; }
@@ -448,6 +706,8 @@ export default function Page() {
           .hero, .grid { display: block; }
           .latest { width: auto; margin-top: 16px; }
           .stats, .heatmap-grid { grid-template-columns: 1fr; }
+          .head-top { display: block; }
+          .head-consensus { min-width: 0; margin-top: 14px; }
           .page { padding: 16px; }
         }
       `}</style>
@@ -456,7 +716,7 @@ export default function Page() {
         <section className="hero">
           <div className="hero-card">
             <h1>宾果六合彩尾数预测与回测系统</h1>
-            <p className="subtitle">增加下一期尾数参考，不预测具体开奖号码。系统自动读取历史开奖，分别测试近 20 / 30 / 50 / 100 期的命中率、最大连错、当前连错和覆盖率，筛出当前综合排名最高的 8 尾方案。</p>
+            <p className="subtitle">自动读取最近100期宾果六合彩开奖记录，同时提供尾数与头数分析。新增10个头数优选方案：20期4热、30期3热+1冷、30期2热+2冷；每个方案固定预测4个头并做滚动回测。</p>
 
             {selected && (
               <div className="selected-box">
@@ -512,6 +772,94 @@ export default function Page() {
         </div>
 
         {error && <div className="error">{error}</div>}
+
+        <div className="card head-predict-card">
+          <div className="head-top">
+            <div>
+              <h2 style={{ marginBottom: 8 }}>下期头数预测｜10个优选方案</h2>
+              <p className="subtitle">
+                头数规则：01–09=0头，10–19=1头，20–29=2头，30–39=3头，40–49=4头。
+                每个方案固定选择4个头，并使用历史逐期滚动回测计算命中率。
+              </p>
+            </div>
+
+            <div className="head-consensus">
+              <div className="latest-title">10方案综合｜下一期4个头</div>
+              <div className="head-list" style={{ marginBottom: 12 }}>
+                {headConsensus.heads.map((head) => <HeadBadge key={head} head={head} />)}
+              </div>
+              <button className="copy-btn" onClick={copyHeadConsensus}>
+                {headCopied ? '已复制' : '复制4个头'}
+              </button>
+            </div>
+          </div>
+
+          <div className="head-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>优先</th>
+                  <th>方案 / 逻辑</th>
+                  <th>下期4头</th>
+                  <th>近20期</th>
+                  <th>近30期</th>
+                  <th>近50期</th>
+                  <th>最大连错</th>
+                  <th>最近走势</th>
+                </tr>
+              </thead>
+              <tbody>
+                {headRanking.map((item, index) => (
+                  <tr key={item.id}>
+                    <td><span className="rank-chip">{index + 1}</span></td>
+                    <td className="head-row-title">
+                      <strong>{item.name}</strong>
+                      <br />
+                      <span className="method-chip">{item.group}</span>
+                    </td>
+                    <td>
+                      <div className="head-list">
+                        {item.heads.map((head) => <HeadBadge key={head} head={head} />)}
+                      </div>
+                    </td>
+                    <td>
+                      <span className="head-rate-main">{fmtPercent(item.result20.hitRate)}</span>
+                      <div className="muted">{item.result20.hitCount}/{item.result20.testedCount}</div>
+                    </td>
+                    <td>
+                      <span className="head-rate-main">{fmtPercent(item.result30.hitRate)}</span>
+                      <div className="muted">{item.result30.hitCount}/{item.result30.testedCount}</div>
+                    </td>
+                    <td>
+                      <span className="head-rate-main">{fmtPercent(item.result50.hitRate)}</span>
+                      <div className="muted">{item.result50.hitCount}/{item.result50.testedCount}</div>
+                    </td>
+                    <td>
+                      <strong>{item.result50.maxMiss}</strong>
+                      <div className="muted">当前 {item.result20.currentMiss}</div>
+                    </td>
+                    <td>
+                      <div className="head-hit-dots">
+                        {item.result20.rows.slice(0, 20).reverse().map((row) => (
+                          <span
+                            key={`${item.id}-${row.expect}`}
+                            className={row.hit ? 'head-hit-dot good' : 'head-hit-dot'}
+                            title={`第${row.expect}期｜开奖号头${row.actualHead}｜${row.hit ? '命中' : '未中'}`}
+                          />
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="head-note">
+            方案构成：方案1–4＝20期｜4热；方案5–7＝30期｜3热+1冷；方案8–10＝30期｜2热+2冷。
+            排名按近20/30/50期滚动回测命中率加权，并扣除最大连错后自动排序。历史开奖只用于统计，不代表未来一定命中。
+          </div>
+        </div>
 
         <section className="grid">
           <div>
