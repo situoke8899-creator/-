@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/30438218/README.md)
 # 宾果六合彩尾数预测与回测系统
 
 ## 文件
