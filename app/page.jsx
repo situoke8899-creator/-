@@ -507,6 +507,213 @@ function TailBadge({ tail, active = false }) {
   return <span className={active ? 'tail-badge active' : 'tail-badge'}>{tail}</span>
 }
 
+
+const COMBO_FREEZE_VERSION = 'tail-head-combo-freeze-v1'
+
+function getComboFreezeKey(expect) {
+  return `bingosix-tail-head-combo-${COMBO_FREEZE_VERSION}-${expect}`
+}
+
+function readComboFreeze(expect) {
+  if (typeof window === 'undefined' || !expect) return null
+
+  try {
+    const raw = window.localStorage.getItem(getComboFreezeKey(expect))
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    if (parsed?.version !== COMBO_FREEZE_VERSION) return null
+    if (String(parsed?.expect) !== String(expect)) return null
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function writeComboFreeze(record) {
+  if (typeof window === 'undefined' || !record?.expect) return record
+
+  const old = readComboFreeze(record.expect)
+  if (old) return old
+
+  try {
+    window.localStorage.setItem(
+      getComboFreezeKey(record.expect),
+      JSON.stringify(record)
+    )
+  } catch (error) {
+    console.warn('保存尾数+头数组合冻结失败', error)
+  }
+
+  return record
+}
+
+function settleComboFreeze(record, draw) {
+  if (!record || record.status === 'settled') return record
+
+  const specialNumber = Number(draw?.specialNumber || draw?.numbers?.[6])
+  const actualTail = getTail(specialNumber)
+  const actualHead = getHead(specialNumber)
+  const tailHit = record.tailTails.includes(actualTail)
+  const headHit = record.heads.includes(actualHead)
+
+  const settled = {
+    ...record,
+    status: 'settled',
+    settledAt: Date.now(),
+    specialNumber,
+    actualTail,
+    actualHead,
+    tailHit,
+    headHit,
+    hit: tailHit && headHit,
+  }
+
+  try {
+    window.localStorage.setItem(
+      getComboFreezeKey(record.expect),
+      JSON.stringify(settled)
+    )
+  } catch (error) {
+    console.warn('更新尾数+头数组合冻结失败', error)
+  }
+
+  return settled
+}
+
+function buildTailHeadComboStats(history, tailStrategy, headStrategy, size) {
+  const rows = []
+  const limit = Math.min(size, history.length)
+
+  for (let index = 0; index < limit; index += 1) {
+    const past = history.slice(index + 1)
+    if (past.length < headStrategy.window) continue
+
+    const draw = history[index]
+    const specialNumber = Number(draw.specialNumber || draw.numbers?.[6])
+    const actualTail = getTail(specialNumber)
+    const actualHead = getHead(specialNumber)
+    const predictedHeads = predictHeadsFromHistory(past, headStrategy)
+    const tailHit = tailStrategy.tails.includes(actualTail)
+    const headHit = predictedHeads.includes(actualHead)
+
+    rows.push({
+      expect: draw.expect,
+      specialNumber,
+      actualTail,
+      actualHead,
+      predictedHeads,
+      tailHit,
+      headHit,
+      hit: tailHit && headHit,
+    })
+  }
+
+  const results = rows.map((row) => row.hit)
+  const hitCount = rows.filter((row) => row.hit).length
+
+  return {
+    rows,
+    testedCount: rows.length,
+    hitCount,
+    hitRate: rows.length ? (hitCount / rows.length) * 100 : 0,
+    maxMiss: calcMaxMiss(results),
+    currentMiss: calcCurrentMiss(results),
+  }
+}
+
+function buildBestTailHeadCombo(history, tailRanking, headRanking) {
+  let best = null
+
+  tailRanking.slice(0, 10).forEach((tailStrategy, tailIndex) => {
+    headRanking.slice(0, 10).forEach((headStrategy, headIndex) => {
+      const result20 = buildTailHeadComboStats(history, tailStrategy, headStrategy, 20)
+      const result30 = buildTailHeadComboStats(history, tailStrategy, headStrategy, 30)
+      const result50 = buildTailHeadComboStats(history, tailStrategy, headStrategy, 50)
+      const result100 = buildTailHeadComboStats(history, tailStrategy, headStrategy, 100)
+
+      if (result20.testedCount < 10) return
+
+      const score =
+        result20.hitRate * 0.42 +
+        result30.hitRate * 0.28 +
+        result50.hitRate * 0.18 +
+        result100.hitRate * 0.12 -
+        result20.maxMiss * 1.3 -
+        result20.currentMiss * 0.7
+
+      const candidate = {
+        tailRank: tailIndex + 1,
+        headRank: headIndex + 1,
+        tailStrategy,
+        headStrategy,
+        heads: [...headStrategy.heads],
+        result20,
+        result30,
+        result50,
+        result100,
+        score: Number(score.toFixed(2)),
+      }
+
+      if (
+        !best ||
+        candidate.score > best.score ||
+        (candidate.score === best.score && candidate.result20.hitRate > best.result20.hitRate) ||
+        (candidate.score === best.score && candidate.result20.hitRate === best.result20.hitRate && candidate.result100.hitRate > best.result100.hitRate)
+      ) {
+        best = candidate
+      }
+    })
+  })
+
+  return best
+}
+
+function makeComboFreezeRecord(expect, combo) {
+  return {
+    version: COMBO_FREEZE_VERSION,
+    expect: String(expect || ''),
+    createdAt: Date.now(),
+    status: 'pending',
+
+    tailRank: combo.tailRank,
+    tailId: combo.tailStrategy.id,
+    tailName: combo.tailStrategy.name,
+    tailLogic: combo.tailStrategy.logic,
+    tailTails: [...combo.tailStrategy.tails],
+
+    headRank: combo.headRank,
+    headId: combo.headStrategy.id,
+    headName: combo.headStrategy.name,
+    headGroup: combo.headStrategy.group,
+    heads: [...combo.heads],
+
+    score: combo.score,
+    rate20: combo.result20.hitRate,
+    rate30: combo.result30.hitRate,
+    rate50: combo.result50.hitRate,
+    rate100: combo.result100.hitRate,
+    maxMiss: combo.result50.maxMiss,
+    currentMiss: combo.result20.currentMiss,
+  }
+}
+
+function collectComboFreezeRecords(history) {
+  if (typeof window === 'undefined') return []
+
+  return history
+    .map((draw) => {
+      const record = readComboFreeze(draw.expect)
+      return record ? settleComboFreeze(record, draw) : null
+    })
+    .filter(Boolean)
+}
+
+function ComboBadge({ children }) {
+  return <span className="combo-badge">{children}</span>
+}
+
 function NumberBall({ num, special = false }) {
   return <span className={special ? 'num-ball special' : 'num-ball'}>{String(num).padStart(2, '0')}</span>
 }
@@ -519,6 +726,9 @@ export default function Page() {
   const [copied, setCopied] = useState(false)
   const [selectedCopied, setSelectedCopied] = useState(false)
   const [headCopied, setHeadCopied] = useState(false)
+  const [optimizedCombo, setOptimizedCombo] = useState(null)
+  const [comboFreezeRecords, setComboFreezeRecords] = useState([])
+  const [comboCopied, setComboCopied] = useState(false)
 
   async function loadData() {
     setLoading(true)
@@ -571,6 +781,10 @@ export default function Page() {
   const currentDrawRows = useMemo(() => buildCurrentDrawRows(ranking, data?.latest), [ranking, data?.latest])
   const [frozenRecords, setFrozenRecords] = useState([])
   const nextTails = consensus.tails.length ? consensus.tails : selected?.tails || []
+  const pendingComboFreeze = useMemo(
+    () => readComboFreeze(data?.nextExpect),
+    [data?.nextExpect, comboFreezeRecords]
+  )
 
   useEffect(() => {
     if (!history.length || !ranking.length) return
@@ -578,6 +792,11 @@ export default function Page() {
     history.slice(0, 20).forEach((draw) => writeFrozenDraw(draw, ranking))
     setFrozenRecords(buildFrozen20Records(history, ranking))
   }, [history, ranking])
+
+  useEffect(() => {
+    if (!history.length) return
+    setComboFreezeRecords(collectComboFreezeRecords(history.slice(0, 100)))
+  }, [history])
 
   useEffect(() => {
     if (!selectedId && ranking[0]?.id) setSelectedId(ranking[0].id)
@@ -621,6 +840,52 @@ export default function Page() {
     }
   }
 
+  function optimizeTailHeadCombo() {
+    if (!history.length || !ranking.length || !headRanking.length) {
+      alert('开奖数据不足，暂时不能优化。')
+      return
+    }
+
+    const existed = readComboFreeze(data?.nextExpect)
+    if (existed) {
+      setOptimizedCombo(existed)
+      return
+    }
+
+    const best = buildBestTailHeadCombo(history, ranking, headRanking)
+    if (!best) {
+      alert('可回测数据不足，暂时不能生成最优组合。')
+      return
+    }
+
+    const frozen = writeComboFreeze(
+      makeComboFreezeRecord(data?.nextExpect, best)
+    )
+
+    setOptimizedCombo(frozen)
+    setComboFreezeRecords(collectComboFreezeRecords(history.slice(0, 100)))
+  }
+
+  async function copyOptimizedCombo() {
+    const combo = optimizedCombo || pendingComboFreeze
+    if (!combo) return
+
+    const copyText = [
+      `第${combo.expect || '-'}期尾数+头数最优组合`,
+      `尾数第${combo.tailRank}名：${combo.tailTails.join(' ')}`,
+      `头数第${combo.headRank}名：${combo.heads.map((head) => `${head}头`).join(' ')}`,
+      `近20期：${fmtPercent(combo.rate20)}`,
+    ].join('｜')
+
+    try {
+      await navigator.clipboard.writeText(copyText)
+      setComboCopied(true)
+      window.setTimeout(() => setComboCopied(false), 1500)
+    } catch {
+      alert(copyText)
+    }
+  }
+
   return (
     <main className="page">
       <style jsx global>{`
@@ -636,6 +901,20 @@ export default function Page() {
         .latest { width: 390px; padding: 22px; }
         .latest-title { color: #9fb2cc; font-size: 14px; margin-bottom: 10px; }
         .selected-box { margin-top: 28px; padding: 18px; border-radius: 16px; border: 1px solid rgba(56, 189, 248, .28); background: rgba(2, 6, 23, .22); }
+        .combo-optimizer { margin-top: 18px; padding: 16px; border-radius: 16px; border: 1px solid rgba(34,197,94,.42); background: linear-gradient(145deg, rgba(34,197,94,.10), rgba(2,6,23,.28)); }
+        .combo-optimizer-head { display: flex; justify-content: space-between; gap: 14px; align-items: center; }
+        .combo-optimize-btn { border: 1px solid #86efac; border-radius: 12px; padding: 11px 16px; background: linear-gradient(145deg,#22c55e,#16a34a); color: #052e16; font-weight: 900; cursor: pointer; white-space: nowrap; }
+        .combo-result { margin-top: 13px; padding-top: 13px; border-top: 1px solid rgba(134,239,172,.20); }
+        .combo-ranks { display: flex; flex-wrap: wrap; gap: 8px; margin: 9px 0; }
+        .combo-badge { display: inline-flex; align-items: center; min-height: 31px; padding: 0 10px; border-radius: 10px; background: #22c55e; color: #052e16; border: 1px solid #86efac; font-weight: 900; }
+        .combo-rate-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin-top: 10px; }
+        .combo-rate-item { padding: 9px; border-radius: 10px; background: rgba(2,6,23,.30); border: 1px solid rgba(148,163,184,.15); }
+        .combo-freeze-status { margin-top: 10px; padding: 9px 11px; border-radius: 10px; background: rgba(250,204,21,.08); border: 1px solid rgba(250,204,21,.22); color: #fde68a; font-size: 13px; }
+        .combo-history { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+        .combo-history-pill { padding: 5px 8px; border-radius: 999px; font-size: 12px; font-weight: 900; }
+        .combo-history-pill.hit { background: rgba(34,197,94,.16); color: #4ade80; }
+        .combo-history-pill.miss { background: rgba(239,68,68,.14); color: #fb7185; }
+
         .selected-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
         .selected-name { font-size: 20px; font-weight: 900; }
         .selected-desc { color: #a8bdd8; font-size: 13px; margin-top: 6px; }
@@ -705,7 +984,9 @@ export default function Page() {
         @media (max-width: 900px) {
           .hero, .grid { display: block; }
           .latest { width: auto; margin-top: 16px; }
-          .stats, .heatmap-grid { grid-template-columns: 1fr; }
+          .stats, .heatmap-grid, .combo-rate-grid { grid-template-columns: 1fr; }
+          .combo-optimizer-head { display: block; }
+          .combo-optimize-btn { margin-top: 10px; width: 100%; }
           .head-top { display: block; }
           .head-consensus { min-width: 0; margin-top: 14px; }
           .page { padding: 16px; }
@@ -717,6 +998,82 @@ export default function Page() {
           <div className="hero-card">
             <h1>宾果六合彩尾数预测与回测系统</h1>
             <p className="subtitle">自动读取最近100期宾果六合彩开奖记录，同时提供尾数与头数分析。新增10个头数优选方案：20期4热、30期3热+1冷、30期2热+2冷；每个方案固定预测4个头并做滚动回测。</p>
+
+            <div className="combo-optimizer">
+              <div className="combo-optimizer-head">
+                <div>
+                  <div className="latest-title">尾数 + 头数自动优化</div>
+                  <strong>自动比较尾数10档 × 头数10档，共100种组合</strong>
+                  <div className="muted" style={{ marginTop: 5 }}>
+                    按近20/30/50/100期组合命中率与连错综合评分，选出当前最优组合并锁定下一期。
+                  </div>
+                </div>
+
+                <button className="combo-optimize-btn" onClick={optimizeTailHeadCombo}>
+                  ★ 优化最优方案
+                </button>
+              </div>
+
+              {(optimizedCombo || pendingComboFreeze) && (() => {
+                const combo = optimizedCombo || pendingComboFreeze
+                return (
+                  <div className="combo-result">
+                    <div className="copy-row">
+                      <div>
+                        <strong>第 {combo.expect || data?.nextExpect || '-'} 期最优组合</strong>
+                        <div className="combo-ranks">
+                          <ComboBadge>尾数第 {combo.tailRank} 名</ComboBadge>
+                          <ComboBadge>头数第 {combo.headRank} 名</ComboBadge>
+                          <ComboBadge>综合评分 {Number(combo.score || 0).toFixed(2)}</ComboBadge>
+                        </div>
+                      </div>
+                      <button className="copy-btn" onClick={copyOptimizedCombo}>
+                        {comboCopied ? '已复制' : '复制最优组合'}
+                      </button>
+                    </div>
+
+                    <div className="muted">尾数：{combo.tailTails.join(' ')}</div>
+                    <div className="muted" style={{ marginTop: 5 }}>
+                      头数：{combo.heads.map((head) => `${head}头`).join(' ')}
+                    </div>
+
+                    <div className="combo-rate-grid">
+                      {[
+                        ['近20期', combo.rate20],
+                        ['近30期', combo.rate30],
+                        ['近50期', combo.rate50],
+                        ['近100期', combo.rate100],
+                      ].map(([label, rate]) => (
+                        <div className="combo-rate-item" key={label}>
+                          <div className="muted">{label}组合命中率</div>
+                          <strong>{fmtPercent(rate)}</strong>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="combo-freeze-status">
+                      {combo.status === 'settled'
+                        ? `已开奖冻结：特码${String(combo.specialNumber || 0).padStart(2, '0')}｜尾${combo.actualTail}｜${combo.actualHead}头｜${combo.hit ? '命中' : '未中'}`
+                        : '下一期方案已冻结。开奖后只追加命中/未中，不会重新修改尾数排名和头数排名。'}
+                    </div>
+
+                    {comboFreezeRecords.length > 0 && (
+                      <div className="combo-history">
+                        {comboFreezeRecords.slice(0, 12).map((record) => (
+                          <span
+                            className={record.hit ? 'combo-history-pill hit' : 'combo-history-pill miss'}
+                            key={record.expect}
+                            title={`第${record.expect}期｜尾数第${record.tailRank}名 + 头数第${record.headRank}名`}
+                          >
+                            {record.expect}｜{record.hit ? '中' : '未中'}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
+            </div>
 
             {selected && (
               <div className="selected-box">
